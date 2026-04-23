@@ -1,0 +1,18 @@
+{
+  "feature_order": [
+    "torso_verticality",
+    "hip_knee_angle",
+    "head_to_floor_distance",
+    "bounding_box_ratio"
+  ],
+  "intercept": -1.4291609262079459,
+  "coefficients": [
+    -1.5334397692302808,
+    0.032520078156034415,
+    1.4150597448356768,
+    -8.23687911238297
+  ],
+  "metrics": {
+    "train_accuracy": 0.88
+  }
+}

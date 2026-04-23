@@ -1,31 +1,16 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from math import exp
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.request import urlretrieve
 import numpy as np
 try:
     import cv2
     import mediapipe as mp
-except ImportError:  # Allows importing this module in environments without CV deps.
+except ImportError:  
     cv2 = None
     mp = None
-@dataclass
-class PostureFeatures:
-    torso_verticality: float
-    hip_knee_angle: float
-    head_to_floor_distance: float
-    bounding_box_ratio: float
-
-    def as_array(self) -> np.ndarray:
-        return np.array(
-            [
-                self.torso_verticality,
-                self.hip_knee_angle,
-                self.head_to_floor_distance,
-                self.bounding_box_ratio,
-            ],
-            dtype=np.float32,
-        )
 
 def _clip01(value: float)->float:
     return float(max(0.0, min(1.0, value)))
@@ -48,6 +33,15 @@ def _angle_degrees(a: np.ndarray, b: np.ndarray, c: np.ndarray)->float:
     angle = float(np.degrees(np.arccos(cosine)))
     return angle
 
+class PostureFeatures:
+    torso_verticality: float
+    hip_knee_angle: float
+    head_to_floor_distance: float
+    bounding_box_ratio: float
+
+    def as_array(self) -> np.ndarray:
+        return np.array([self.torso_verticality,self.hip_knee_angle,self.head_to_floor_distance,self.bounding_box_ratio,],dtype=np.float32)
+
 class PostureRiskDetector:
     """Posture detection and risk scoring using MediaPipe landmarks + logistic model.
     Features used:
@@ -64,18 +58,18 @@ class PostureRiskDetector:
     RIGHT_HIP = 24
     LEFT_KNEE = 25
     RIGHT_KNEE = 26
+    DEFAULT_TASK_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+                              "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task")
 
-    def __init__(self,threshold: float = 0.60,coefficients: Optional[List[float]] = None,intercept: float = 0.0,min_visibility: float = 0.5,pose_model_path: Optional[str] = None,)->None:
+    def __init__(self,threshold: float = 0.20,coefficients: Optional[List[float]]=None,intercept: float = -1.4291609262079459,min_visibility: float = 0.5,pose_model_path: Optional[str] = None,auto_download_model: bool = True,)->None:
         """coefficients order:
-        [torso_verticality, hip_knee_angle, head_to_floor_distance, bounding_box_ratio]
-
-        Default coefficients are hand-picked priors and should be replaced by
-        fitted values once you collect labeled posture data."""
+        [torso_verticality, hip_knee_angle, head_to_floor_distance, bounding_box_ratio]"""
+        
         self.threshold = threshold
         self.intercept = intercept
         self.min_visibility = min_visibility
         self.coefficients = np.array(
-            coefficients if coefficients is not None else [-3.2, -0.02, 2.4, -2.0],
+            coefficients if coefficients is not None else [-1.5334397692302808,0.032520078156034415,1.4150597448356768,-8.23687911238297],
             dtype=np.float32,
         )
 
@@ -104,14 +98,18 @@ class PostureRiskDetector:
                 ) from exc
 
             if not pose_model_path:
-                raise ValueError(
-                    "This mediapipe build requires the Tasks API model file. "
-                    "Provide pose_model_path to PostureRiskDetector(...) or pass "
-                    "--pose-model in CLI."
-                )
+                pose_model_path = str((Path.cwd() / "pose_landmarker_lite.task").resolve())
+            model_path = Path(pose_model_path).resolve()
+            if not model_path.exists():
+                if not auto_download_model:
+                    raise ValueError(
+                        f"Pose model file not found: {model_path}. "
+                        "Set auto_download_model=True or pass --pose-model."
+                    )
+                self._download_pose_model(model_path)
 
             options = vision.PoseLandmarkerOptions(
-                base_options=BaseOptions(model_asset_path=pose_model_path),
+                base_options=BaseOptions(model_asset_path=str(model_path)),
                 running_mode=vision.RunningMode.IMAGE,
                 min_pose_detection_confidence=0.5,
                 min_pose_presence_confidence=0.5,
@@ -121,21 +119,48 @@ class PostureRiskDetector:
             self._landmarker = vision.PoseLandmarker.create_from_options(options)
             self._backend = "tasks"
 
+    def _download_pose_model(cls, model_path: Path) -> None:
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            print(f"Downloading pose model to: {model_path}")
+            urlretrieve(cls.DEFAULT_TASK_MODEL_URL, str(model_path))
+            if not model_path.exists() or model_path.stat().st_size == 0:
+                raise RuntimeError("Downloaded model file is empty.")
+        except Exception as exc:
+            if model_path.exists():
+                model_path.unlink()
+            raise RuntimeError(
+                "Failed to auto-download pose model. "
+                "Please check internet or provide --pose-model manually."
+            ) from exc
+
+    def load_params_from_json(params_path: str) -> Dict[str, Any]:
+        import json
+
+        with open(params_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "coefficients" not in data or "intercept" not in data:
+            raise ValueError(
+                "Params JSON must contain keys: 'coefficients' and 'intercept'."
+            )
+        if len(data["coefficients"]) != 4:
+            raise ValueError("Params JSON 'coefficients' must contain 4 values.")
+        return data
+
     def close(self) -> None:
         if self._pose is not None:
             self._pose.close()
         if self._landmarker is not None:
             self._landmarker.close()
 
-    def _landmark_to_xy(
-        self, landmarks: List, idx: int
-    ) -> Tuple[np.ndarray, float]:
+    def _landmark_to_xy(self, landmarks: List, idx: int)->Tuple[np.ndarray, float]:
         lm = landmarks[idx]
         point = np.array([lm.x, lm.y], dtype=np.float32)
         visibility = float(getattr(lm, "visibility", 1.0))
         return point, visibility
 
-    def extract_features_from_landmarks(self, landmarks: List) -> PostureFeatures:
+    def extract_features_from_landmarks(self, landmarks: List)->PostureFeatures:
         l_sh, v1 = self._landmark_to_xy(landmarks, self.LEFT_SHOULDER)
         r_sh, v2 = self._landmark_to_xy(landmarks, self.RIGHT_SHOULDER)
         l_hip, v3 = self._landmark_to_xy(landmarks, self.LEFT_HIP)
@@ -198,15 +223,21 @@ class PostureRiskDetector:
         features = self.extract_features_from_landmarks(landmarks)
         score = self.risk_score(features)
         label = self.posture_label(features)
+        posture_override_high_risk = label in {"lying_flat", "fetal_like"}
         return {
             "posture_label": label,
             "posture_score": score,
-            "is_high_risk": score >= self.threshold,
+            "is_high_risk": (score >= self.threshold) or posture_override_high_risk,
             "features": {
                 "torso_verticality": round(features.torso_verticality, 4),
                 "hip_knee_angle": round(features.hip_knee_angle, 2),
                 "head_to_floor_distance": round(features.head_to_floor_distance, 4),
                 "bounding_box_ratio": round(features.bounding_box_ratio, 4),
+            },
+            "decision_context": {
+                "threshold": self.threshold,
+                "score_triggered": score >= self.threshold,
+                "posture_override_triggered": posture_override_high_risk,
             },
         }
 
@@ -286,19 +317,19 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Posture risk detection demo")
     parser.add_argument("--image", type=str, required=True, help="Path to input image")
-    parser.add_argument("--threshold", type=float, default=0.7, help="Risk threshold")
-    parser.add_argument(
-        "--pose-model",
-        type=str,
-        default=None,
-        help="Path to MediaPipe .task model (needed for Tasks API builds).",
-    )
+    parser.add_argument("--threshold", type=float, default=0.2, help="Risk threshold")
+    parser.add_argument("--params-json",type=str,default=None,help="Path to trained logistic params JSON file.")
+    parser.add_argument("--pose-model",type=str,default=None,help="Path to MediaPipe .task model (auto-downloaded if missing).")
+    parser.add_argument("--no-auto-download",action="store_true",help="Disable automatic model download when task model is missing.")
     args = parser.parse_args()
 
-    detector = PostureRiskDetector(
-        threshold=args.threshold,
-        pose_model_path=args.pose_model,
-    )
+    coefficients = None
+    intercept = 0.0
+    if args.params_json:
+        trained_params = PostureRiskDetector.load_params_from_json(args.params_json)
+        coefficients = trained_params["coefficients"]
+        intercept = trained_params["intercept"]
+    detector = PostureRiskDetector(threshold=args.threshold,coefficients=coefficients,intercept=intercept,pose_model_path=args.pose_model,auto_download_model=not args.no_auto_download,)
     try:
         output = detector.analyze_image_path(args.image)
         print(json.dumps(output, indent=2))
