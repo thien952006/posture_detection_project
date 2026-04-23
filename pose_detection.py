@@ -14,12 +14,10 @@ except ImportError:
 
 def _clip01(value: float)->float:
     return float(max(0.0, min(1.0, value)))
-
 def _sigmoid(z: float)->float:
     return 1.0 / (1.0 + exp(-z))
-
 def _angle_degrees(a: np.ndarray, b: np.ndarray, c: np.ndarray)->float:
-    """Compute angle ABC in degrees."""
+    #Compute angle ABC in degrees.
     ba = a - b
     bc = c - b
 
@@ -33,6 +31,8 @@ def _angle_degrees(a: np.ndarray, b: np.ndarray, c: np.ndarray)->float:
     angle = float(np.degrees(np.arccos(cosine)))
     return angle
 
+
+@dataclass
 class PostureFeatures:
     torso_verticality: float
     hip_knee_angle: float
@@ -41,14 +41,15 @@ class PostureFeatures:
 
     def as_array(self) -> np.ndarray:
         return np.array([self.torso_verticality,self.hip_knee_angle,self.head_to_floor_distance,self.bounding_box_ratio,],dtype=np.float32)
-
 class PostureRiskDetector:
-    """Posture detection and risk scoring using MediaPipe landmarks + logistic model.
+    """
+    Posture detection and risk scoring using MediaPipe landmarks + logistic model.
     Features used:
-    1) torso_verticality      : |shoulder_y - hip_y| (smaller means likely horizontal)
-    2) hip_knee_angle         : angle at hip between shoulder-hip-knee
-    3) head_to_floor_distance : nose_y (larger means closer to floor in normalized frame)
-    4) bounding_box_ratio     : bbox_height / bbox_width (smaller means horizontal spread)"""
+    1)torso_verticality: |shoulder_y - hip_y| (smaller means likely horizontal)
+    2)hip_knee_angle: angle at hip between shoulder-hip-knee
+    3)head_to_floor_distance: nose_y (larger means closer to floor in normalized frame)
+    4)bounding_box_ratio: bbox_height / bbox_width (smaller means horizontal spread)
+    """
 
     # MediaPipe Pose landmark indices
     NOSE = 0
@@ -60,10 +61,8 @@ class PostureRiskDetector:
     RIGHT_KNEE = 26
     DEFAULT_TASK_MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
                               "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task")
-
-    def __init__(self,threshold: float = 0.20,coefficients: Optional[List[float]]=None,intercept: float = -1.4291609262079459,min_visibility: float = 0.5,pose_model_path: Optional[str] = None,auto_download_model: bool = True,)->None:
-        """coefficients order:
-        [torso_verticality, hip_knee_angle, head_to_floor_distance, bounding_box_ratio]"""
+    def __init__(self,threshold: float = 0.20,coefficients: Optional[List[float]]=None,intercept: float = -1.4291609262079459,min_visibility: float = 0.1,pose_model_path: Optional[str] = None,auto_download_model: bool = True,)->None:
+        #coefficients order:[torso_verticality, hip_knee_angle, head_to_floor_distance, bounding_box_ratio]
         
         self.threshold = threshold
         self.intercept = intercept
@@ -118,7 +117,6 @@ class PostureRiskDetector:
             )
             self._landmarker = vision.PoseLandmarker.create_from_options(options)
             self._backend = "tasks"
-
     def _download_pose_model(cls, model_path: Path) -> None:
         model_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -133,7 +131,6 @@ class PostureRiskDetector:
                 "Failed to auto-download pose model. "
                 "Please check internet or provide --pose-model manually."
             ) from exc
-
     def load_params_from_json(params_path: str) -> Dict[str, Any]:
         import json
 
@@ -147,19 +144,16 @@ class PostureRiskDetector:
         if len(data["coefficients"]) != 4:
             raise ValueError("Params JSON 'coefficients' must contain 4 values.")
         return data
-
     def close(self) -> None:
         if self._pose is not None:
             self._pose.close()
         if self._landmarker is not None:
             self._landmarker.close()
-
     def _landmark_to_xy(self, landmarks: List, idx: int)->Tuple[np.ndarray, float]:
         lm = landmarks[idx]
         point = np.array([lm.x, lm.y], dtype=np.float32)
         visibility = float(getattr(lm, "visibility", 1.0))
         return point, visibility
-
     def extract_features_from_landmarks(self, landmarks: List)->PostureFeatures:
         l_sh, v1 = self._landmark_to_xy(landmarks, self.LEFT_SHOULDER)
         r_sh, v2 = self._landmark_to_xy(landmarks, self.RIGHT_SHOULDER)
@@ -198,7 +192,6 @@ class PostureRiskDetector:
             head_to_floor_distance=head_to_floor_distance,
             bounding_box_ratio=bounding_box_ratio,
         )
-
     def posture_label(self, features: PostureFeatures) -> str:
         angle = features.hip_knee_angle
         ratio = features.bounding_box_ratio
@@ -213,12 +206,10 @@ class PostureRiskDetector:
         if 70 <= angle <= 115:
             return "sitting"
         return "standing_or_other"
-
     def risk_score(self, features: PostureFeatures) -> float:
         x = features.as_array()
         z = float(self.intercept + np.dot(self.coefficients, x))
         return _clip01(_sigmoid(z))
-
     def analyze_landmarks(self, landmarks: List) -> Dict:
         features = self.extract_features_from_landmarks(landmarks)
         score = self.risk_score(features)
@@ -240,7 +231,6 @@ class PostureRiskDetector:
                 "posture_override_triggered": posture_override_high_risk,
             },
         }
-
     def _tasks_landmarks_to_points(self, landmarks: List[Any]) -> List[Any]:
         class _Point:
             def __init__(self, x: float, y: float, visibility: float) -> None:
@@ -256,7 +246,6 @@ class PostureRiskDetector:
             )
             for lm in landmarks
         ]
-
     def analyze_image(self, image_bgr: np.ndarray) -> Dict:
         if cv2 is None:
             raise ImportError(
@@ -300,7 +289,6 @@ class PostureRiskDetector:
             "Pose detector backend is not initialized. "
             "Check mediapipe installation and constructor parameters."
         )
-
     def analyze_image_path(self, image_path: str) -> Dict:
         if cv2 is None:
             raise ImportError("opencv-python is required to read image files.")
@@ -335,3 +323,4 @@ if __name__ == "__main__":
         print(json.dumps(output, indent=2))
     finally:
         detector.close()
+"""HOW TO RUN: python pose_detection.py --image {image_path} """
